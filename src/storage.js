@@ -13,8 +13,8 @@ const writeLS = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } 
 
 const DEMO = import.meta.glob("./demo-seed.json", { eager: true });
 function demoSeed() {
-  if (import.meta.env.VITE_DEMO !== "1" || localStorage.getItem("twt-rooms-seed") === "mahidol-v8") return;
-  localStorage.setItem("twt-rooms-seed", "mahidol-v8");
+  if (import.meta.env.VITE_DEMO !== "1" || localStorage.getItem("twt-rooms-seed") === "mahidol-v9") return;
+  localStorage.setItem("twt-rooms-seed", "mahidol-v9");
   const seed = Object.values(DEMO)[0]?.default; if (!seed) return;
   writeLS(LS_B, seed.bookings); writeLS(LS_S, seed.settings); writeLS(LS_SH, seed.shifts || []);
 }

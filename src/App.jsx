@@ -32,6 +32,37 @@ const roomColor = (settings, id) => { const i = settings.rooms.findIndex((r) => 
 const dayVar = (dateStr) => `var(--day-${(parseYmd(dateStr).getDay() + 6) % 7})`;
 const STAFF_HEX = ["#3B82F6", "#E8772E", "#22A06B", "#D6409F", "#8B5CF6", "#0EA5B7", "#C9A227", "#E5484D"];
 const staffColor = (settings, id) => { const list = settings.staffMembers || []; const i = list.findIndex((m) => m.id === id); const c = list[i]?.color; return c || `var(--staff-${Math.max(0, i) % 8})`; };
+// ประเภทงาน: เช่าสถานที่ = งานภายนอก, นอกนั้น = งานมหาลัย (แอดมินเปลี่ยนได้ต่องาน)
+const jobOf = (b) => b.jobType || (b.role === "renter" ? "ext" : "uni");
+// ทีมงานที่เลือกในงาน → กลายเป็นกะอัตโนมัติ (ใช้คิดโอที) · id คงที่ ซิงก์ซ้ำได้ไม่ซ้อน
+const expectedShifts = (bookings) => bookings
+  .filter((b) => isSlot(b) && b.status === "confirmed" && !b.allDay && (b.crew || []).length)
+  .flatMap((b) => b.crew.map((sid) => ({ id: `j_${b.id}_${sid}`, staffId: sid, date: b.date, start: b.start, end: b.end, status: "work", job: jobOf(b), note: b.title, refId: b.id, auto: true })));
+const reconcileShifts = (bookings, shifts) => {
+  const exp = expectedShifts(bookings);
+  const cur = new Map(shifts.filter((x) => x.auto).map((x) => [x.id, x]));
+  const want = exp.filter((e) => { const c = cur.get(e.id); return !c || ["date", "start", "end", "job", "note", "staffId"].some((k) => c[k] !== e[k]); });
+  const ids = new Set(exp.map((e) => e.id));
+  return { want, drop: [...cur.keys()].filter((id) => !ids.has(id)) };
+};
+function useShiftSync({ bookings, shifts, setShifts }) {
+  const busy = useRef(false);
+  useEffect(() => {
+    if (busy.current || !bookings || !shifts) return;
+    const { want, drop } = reconcileShifts(bookings, shifts);
+    if (!want.length && !drop.length) return;
+    busy.current = true;
+    (async () => {
+      try {
+        if (want.length) await upsertShifts(want);
+        if (drop.length) await deleteShifts(drop);
+        setShifts((cur) => { const m = new Map(cur.filter((x) => !drop.includes(x.id)).map((x) => [x.id, x])); want.forEach((x) => m.set(x.id, x)); return [...m.values()]; });
+      } catch (e) { console.error("sync shifts", e); }
+      busy.current = false;
+    })();
+  }, [bookings, shifts, setShifts]);
+}
+
 // จับชื่อพนักงานจากหมายเหตุ (เช่น "pae+Tucky+Dear") เพื่อแนะนำผู้รับผิดชอบงาน
 const crewFromText = (text, staff) => { const t = (text || "").toLowerCase(); return staff.filter((m) => m.name && t.includes(m.name.toLowerCase())).map((m) => m.id); };
 const useTheme = () => {
@@ -599,6 +630,7 @@ function Admin({ bookings, settings, setBookings, editSettings, saveState, saveE
   const pending = bookings.filter((b) => b.status === "pending");
   const [me, setMe] = useMe();
   const { save, remove, approve, reject, cancel } = useBookingActions({ bookings, setBookings, say, me });
+  useShiftSync({ bookings, shifts, setShifts });
   const actions = { save, remove, approve, reject, cancel };
 
   return (
@@ -635,6 +667,7 @@ function RequestCard({ b, bookings, settings, approve, reject, remove, cancel, o
       <div className="req-head">
         <h3>{b.title || roleName(b)}</h3>
         <span className="pill c">{kindLabel(b)}</span>
+        {isSlot(b) && <span className={"pill job-" + jobOf(b)}>{jobOf(b) === "ext" ? "งานนอก" : "งานมหาลัย"}</span>}
         <span className={"pill st-" + b.status}>{STATUS[b.status]}</span>
       </div>
       <dl className="kv">
@@ -1015,7 +1048,7 @@ function ShiftsView({ settings, bookings, shifts, setShifts, editable, say }) {
                     const list = byCell(m.id, d);
                     const content = list.map((x) => (
                       <span key={x.id} className={"shift" + (x.status === "leave" ? " leave" : "")} style={{ "--sc": staffColor(settings, m.id) }}>
-                        {x.status === "leave" ? "ลา" : `${x.start}–${x.end}`}{x.job === "ext" && x.status !== "leave" ? <i className="tag">นอก</i> : null}{x.note ? <em>{x.note}</em> : null}
+                        {x.status === "leave" ? "ลา" : `${x.start}–${x.end}`}{x.status !== "leave" ? <i className={"tag" + (x.job === "ext" ? "" : " uni")}>{x.job === "ext" ? "นอก" : "มหาลัย"}</i> : null}{x.note ? <em>{x.note}</em> : null}
                       </span>
                     ));
                     return (
@@ -1053,8 +1086,10 @@ function ShiftModal({ m, d, settings, bookings, list, onClose, save, remove }) {
             <div key={x.id} className="contact">
               <b>{x.status === "leave" ? "ลา" : `${x.start}–${x.end} น.`}{x.note ? ` · ${x.note}` : ""}
                 {x.status !== "leave" && <span className="note-small" style={{ display: "block", fontWeight: 400 }}>{x.job === "ext" ? "งานภายนอก" : "งานมหาลัย"} · OT {fmtHrs(otMinutes(x, ot))} ชม.</span>}</b>
-              {x.status !== "leave" && <button className="btn" onClick={() => save([{ ...x, job: x.job === "ext" ? "uni" : "ext" }])}>เปลี่ยนเป็น{x.job === "ext" ? "งานมหาลัย" : "งานนอก"}</button>}
-              <button className="btn danger" onClick={() => remove([x.id])}><Trash2 size={15} /> ลบ</button>
+              {x.auto ? <span className="note-small">มาจากงานในตาราง · แก้คน/เวลา/ประเภทงานที่หน้ารายละเอียดงาน</span> : <>
+                {x.status !== "leave" && <button className="btn" onClick={() => save([{ ...x, job: x.job === "ext" ? "uni" : "ext" }])}>เปลี่ยนเป็น{x.job === "ext" ? "งานมหาลัย" : "งานนอก"}</button>}
+                <button className="btn danger" onClick={() => remove([x.id])}><Trash2 size={15} /> ลบ</button>
+              </>}
             </div>
           ))}
         </section>
@@ -1182,9 +1217,10 @@ function useBookingActions({ bookings, setBookings, say, me }) {
   return { save, remove, approve, reject, cancel };
 }
 
-function ApprovePage({ bookings, settings, setBookings, say }) {
+function ApprovePage({ bookings, settings, setBookings, shifts, setShifts, say }) {
   const [me, setMe] = useMe();
   const actions = useBookingActions({ bookings, setBookings, say, me });
+  useShiftSync({ bookings, shifts, setShifts });
   const n = bookings.filter((b) => b.status === "pending").length;
   return (
     <>
@@ -1405,13 +1441,25 @@ function OTTab({ settings, editSettings, shifts, say }) {
   const [open, setOpen] = useState(null);
 
   const staff = settings.staffMembers || [];
+  // รวมช่วงเวลาที่ซ้อนกันในวันเดียวกัน (นับครั้งเดียว · ถ้าซ้อนระหว่างงานนอกกับงานมหาลัย นับเป็นงานนอก)
+  const rUni = Number(rate.uni) || 0, rExt = Number(rate.ext) || 0;
   const rows = staff.map((m) => {
-    const list = shifts.filter((x) => x.staffId === m.id && x.date >= from && x.date <= to && x.status !== "leave")
-      .map((x) => { const min = otMinutes(x, rate); const r = x.job === "ext" ? Number(rate.ext) || 0 : Number(rate.uni) || 0; return { ...x, min, pay: (min / 60) * r }; })
-      .sort((a, b) => (a.date + a.start).localeCompare(b.date + b.start));
-    const uni = list.filter((x) => x.job !== "ext").reduce((a, x) => a + x.min, 0);
-    const ext = list.filter((x) => x.job === "ext").reduce((a, x) => a + x.min, 0);
-    return { m, list, uni, ext, pay: (uni / 60) * (Number(rate.uni) || 0) + (ext / 60) * (Number(rate.ext) || 0) };
+    const list = shifts.filter((x) => x.staffId === m.id && x.date >= from && x.date <= to && x.status !== "leave");
+    const byDate = {};
+    for (const x of list) {
+      const arr = byDate[x.date] || (byDate[x.date] = new Uint8Array(1440));
+      const st = toMin(x.start), en = Math.min(1440, toMin(x.end));
+      const weekend = (parseYmd(x.date).getDay() + 6) % 7 >= 5, b4 = toMin(rate.before), af = toMin(rate.after);
+      const code = x.job === "ext" ? 2 : 1;
+      for (let t = st; t < en; t++) if (weekend || t < b4 || t >= af) arr[t] = Math.max(arr[t], code);
+    }
+    const days = Object.keys(byDate).sort().map((d) => {
+      let u = 0, e = 0; for (const v of byDate[d]) { if (v === 1) u++; else if (v === 2) e++; }
+      const items = list.filter((x) => x.date === d).sort((p, q) => toMin(p.start) - toMin(q.start));
+      return { d, u, e, pay: (u / 60) * rUni + (e / 60) * rExt, items };
+    });
+    const uni = days.reduce((s2, x) => s2 + x.u, 0), ext = days.reduce((s2, x) => s2 + x.e, 0);
+    return { m, days, uni, ext, pay: (uni / 60) * rUni + (ext / 60) * rExt };
   });
   const total = rows.reduce((a, r) => a + r.pay, 0);
 
@@ -1431,7 +1479,7 @@ function OTTab({ settings, editSettings, shifts, say }) {
           <label className="f"><span>จ–ศ นับโอทีก่อน</span><select className="in" value={rate.before} onChange={(e) => setRate({ ...rate, before: e.target.value })}>{DAY_TIMES.map((t) => <option key={t}>{t}</option>)}</select></label>
           <label className="f"><span>จ–ศ นับโอทีหลัง</span><select className="in" value={rate.after} onChange={(e) => setRate({ ...rate, after: e.target.value })}>{DAY_TIMES.map((t) => <option key={t}>{t}</option>)}</select></label>
         </div>
-        <span className="note-small">วันจันทร์–ศุกร์ นับเฉพาะช่วงก่อน {rate.before} และหลัง {rate.after} · เสาร์–อาทิตย์ นับเป็นโอทีทั้งกะ · ประเภทงานเลือกตอนลงกะ (แท็บกะพนักงาน)</span>
+        <span className="note-small">วันจันทร์–ศุกร์ นับเฉพาะช่วงก่อน {rate.before} และหลัง {rate.after} · เสาร์–อาทิตย์ นับเป็นโอทีทั้งกะ · ประเภทงานเลือกได้ที่หน้ารายละเอียดงาน หรือตอนลงกะเอง</span>
         <span className="note-small">แก้แล้วบันทึกอัตโนมัติ</span>
       </section>
 
@@ -1459,13 +1507,15 @@ function OTTab({ settings, editSettings, shifts, say }) {
                 </button>
                 {open === r.m.id && (
                   <div className="ot-detail">
-                    {r.list.length ? r.list.map((x) => (
-                      <div key={x.id} className="ot-line">
-                        <span>{dayName(x.date)} {parseYmd(x.date).getDate()} {TH_M[parseYmd(x.date).getMonth()]}</span>
-                        <span>{x.start}–{x.end}</span>
-                        <span>{x.job === "ext" ? "งานนอก" : "มหาลัย"}</span>
-                        <span>OT {fmtHrs(x.min)} ชม.</span>
-                        <span className="amt">{fmtBaht(x.pay)}</span>
+                    {r.days.length ? r.days.map((x) => (
+                      <div key={x.d} className="ot-day">
+                        <div className="ot-line">
+                          <span><b>{dayName(x.d)} {parseYmd(x.d).getDate()} {TH_M[parseYmd(x.d).getMonth()]}</b></span>
+                          <span>มหาลัย {fmtHrs(x.u)} ชม.</span>
+                          <span>งานนอก {fmtHrs(x.e)} ชม.</span>
+                          <span className="amt">{fmtBaht(x.pay)}</span>
+                        </div>
+                        <div className="ot-items">{x.items.map((it) => <span key={it.id} className={"chip job-" + (it.job === "ext" ? "ext" : "uni")}>{it.start}–{it.end} {it.job === "ext" ? "นอก" : "มหาลัย"}{it.note ? ` · ${it.note}` : ""}</span>)}</div>
                       </div>
                     )) : <span className="note-small">ไม่มีกะในช่วงนี้</span>}
                   </div>
@@ -1474,7 +1524,7 @@ function OTTab({ settings, editSettings, shifts, say }) {
             ))}
             <div className="ot-row ot-total"><span>รวมทั้งหมด</span><span>{fmtHrs(rows.reduce((a, r) => a + r.uni, 0))} ชม.</span><span>{fmtHrs(rows.reduce((a, r) => a + r.ext, 0))} ชม.</span><span className="amt">{fmtBaht(total)}</span></div>
           </div>
-          <span className="note-small">แตะชื่อเพื่อดูรายละเอียดทีละกะ</span>
+          <span className="note-small">แตะชื่อเพื่อดูรายละเอียดรายวัน · มาจากกะที่ลงเอง และงานที่เลือกเป็นผู้รับผิดชอบ · ช่วงเวลาที่ซ้อนกันนับครั้งเดียว</span>
         </section>
       )}
     </div>
@@ -1490,6 +1540,11 @@ function CrewPicker({ b, settings, save }) {
   const suggest = crewFromText(`${b.note || ""} ${b.title || ""}`, staff).filter((id) => !crew.includes(id));
   return (
     <div className="crew-pick">
+      <span className="crew-label">ประเภทงาน (ใช้คิดค่าโอที)</span>
+      <div className="seg job-seg">
+        <button type="button" className={jobOf(b) === "uni" ? "on" : ""} onClick={() => save([{ ...b, jobType: "uni" }])}>งานมหาลัย</button>
+        <button type="button" className={jobOf(b) === "ext" ? "on" : ""} onClick={() => save([{ ...b, jobType: "ext" }])}>งานภายนอก</button>
+      </div>
       <span className="crew-label">ทีมงานที่รับผิดชอบ{crew.length ? ` (${crew.length} คน)` : ""}</span>
       <div className="chips">
         {staff.map((m) => (
@@ -1498,6 +1553,7 @@ function CrewPicker({ b, settings, save }) {
           </button>
         ))}
       </div>
+      {crew.length > 0 && <span className="note-small">{b.allDay ? "งานนี้เป็นทั้งวัน ไม่มีเวลาเริ่ม-เลิก จึงยังไม่ลงกะ/โอทีให้ · กด แก้ไข เพื่อใส่เวลา" : b.status !== "confirmed" ? "จะลงกะและคิดโอทีให้เมื่อรับรองงานแล้ว" : `ลงกะให้แล้ว ${b.start}–${b.end} · ${jobOf(b) === "ext" ? "งานภายนอก" : "งานมหาลัย"} · ดูโอทีได้ที่แท็บ ค่าโอที`}</span>}
       {suggest.length > 0 && (
         <button type="button" className="btn ghost suggest" onClick={() => save([{ ...b, crew: [...crew, ...suggest] }])}>
           ใส่ตามหมายเหตุ: {suggest.map((id) => staff.find((m) => m.id === id)?.name).join(", ")}

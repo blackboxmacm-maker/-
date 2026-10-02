@@ -332,3 +332,13 @@ button.ot-row:hover { background: var(--soft); }
 .autosave { font-size: 13.5px; color: var(--muted); background: var(--soft); border-radius: 10px; padding: 8px 12px; }
 .autosave.saved { color: var(--ok); background: var(--ok-soft); }
 .autosave.error { color: var(--warn); background: var(--warn-soft); }
+
+.pill.job-ext, .chip.job-ext { background: color-mix(in srgb, var(--room-0) 22%, var(--card)); color: var(--ink); }
+.pill.job-uni, .chip.job-uni { background: color-mix(in srgb, var(--room-1) 22%, var(--card)); color: var(--ink); }
+.job-seg { grid-template-columns: 1fr 1fr; max-width: 360px; }
+.ot-day { display: grid; gap: 4px; padding: 6px 0; border-bottom: 1px solid var(--soft); }
+.ot-day:last-child { border-bottom: 0; }
+.ot-day .ot-line { grid-template-columns: 1.2fr 1fr 1fr .8fr; color: var(--ink); }
+.ot-items { display: flex; flex-wrap: wrap; gap: 4px; }
+.ot-items .chip { font-size: 12px; }
+.shift .tag.uni { opacity: .7; font-weight: 600; }
