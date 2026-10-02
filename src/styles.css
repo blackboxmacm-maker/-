@@ -328,3 +328,7 @@ button.ot-row:hover { background: var(--soft); }
 .crew-toggle.on { border-color: var(--sc); background: color-mix(in srgb, var(--sc) 24%, var(--card)); }
 .crew-toggle.on svg { color: var(--sc); }
 .btn.suggest { justify-self: start; font-size: 13.5px; text-decoration: underline; text-underline-offset: 3px; padding-left: 0; }
+
+.autosave { font-size: 13.5px; color: var(--muted); background: var(--soft); border-radius: 10px; padding: 8px 12px; }
+.autosave.saved { color: var(--ok); background: var(--ok-soft); }
+.autosave.error { color: var(--warn); background: var(--warn-soft); }

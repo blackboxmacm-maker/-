@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronLeft, ChevronRight, Plus, Phone, MessageCircle, Check, X, AlertTriangle, Settings, CalendarDays,
   Copy, Lock, Trash2, Inbox, Pencil, Users, Link2, LogOut, Calculator, Wrench, Ban, Clock, Sun, Moon,
@@ -118,10 +118,13 @@ function useData() {
   const [settings, setSettings] = useState(null);
   const [shifts, setShifts] = useState([]);
   const [err, setErr] = useState("");
+  // การตั้งค่าบันทึกอัตโนมัติ: แก้ทันทีบนจอ → รวมกับข้อมูลล่าสุดในฐานข้อมูล → บันทึก (หลายคนแก้พร้อมกันได้ ไม่ทับกัน)
+  const pending = useRef([]); const timer = useRef(null);
+  const [saveState, setSaveState] = useState(""); const [saveErr, setSaveErr] = useState("");
   const reload = useCallback(async () => {
     try {
       const [b, s, sh] = await Promise.all([loadBookings(), loadSettings(), loadShifts().catch(() => [])]);
-      setBookings(b || []); setShifts(sh || []); setSettings({ ...DEFAULT_SETTINGS, ...(s || {}) }); setErr("");
+      setBookings(b || []); setShifts(sh || []); setSettings(pending.current.reduce((d, f) => f(d), { ...DEFAULT_SETTINGS, ...(s || {}) })); setErr("");
     } catch (e) { setErr(e.message || String(e)); setBookings((x) => x || []); setSettings((x) => x || DEFAULT_SETTINGS); }
   }, []);
   useEffect(() => {
@@ -132,7 +135,29 @@ function useData() {
     const t = setInterval(reload, 60000);
     return () => { un && un(); window.removeEventListener("focus", onFocus); clearInterval(t); };
   }, [reload]);
-  return { bookings, settings, setBookings, setSettings, shifts, setShifts, reload, err };
+  const flush = useCallback(async () => {
+    const fns = pending.current; if (!fns.length) return;
+    pending.current = [];
+    setSaveState("saving");
+    try {
+      const latest = { ...DEFAULT_SETTINGS, ...((await loadSettings()) || {}) };
+      const next = fns.reduce((d, f) => f(d), latest);
+      await saveSettings(next);
+      setSettings(pending.current.reduce((d, f) => f(d), next));
+      setSaveState("saved"); setSaveErr("");
+    } catch (e) {
+      pending.current = [...fns, ...pending.current];
+      setSaveState("error"); setSaveErr(e.message || String(e));
+    }
+  }, []);
+  const editSettings = useCallback((fn) => {
+    setSettings((cur) => fn(cur));
+    pending.current.push(fn);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(flush, 600);
+  }, [flush]);
+  useEffect(() => { const f = () => flush(); window.addEventListener("beforeunload", f); return () => window.removeEventListener("beforeunload", f); }, [flush]);
+  return { bookings, settings, setBookings, setSettings, editSettings, saveState, saveErr, shifts, setShifts, reload, err };
 }
 
 export default function App() {
@@ -569,7 +594,7 @@ function AdminGate({ children, allowStaff }) {
   );
 }
 
-function Admin({ bookings, settings, setBookings, setSettings, shifts, setShifts, say }) {
+function Admin({ bookings, settings, setBookings, editSettings, saveState, saveErr, shifts, setShifts, say }) {
   const [tab, setTab] = useState("pending");
   const pending = bookings.filter((b) => b.status === "pending");
   const [me, setMe] = useMe();
@@ -586,10 +611,10 @@ function Admin({ bookings, settings, setBookings, setSettings, shifts, setShifts
         <button className={"tab" + (tab === "settings" ? " on" : "")} onClick={() => setTab("settings")}><Settings size={17} /> ตั้งค่า</button>
       </nav>
       {tab === "pending" && <><ApproverPicker settings={settings} me={me} setMe={setMe} /><PendingTab bookings={bookings} settings={settings} {...actions} /></>}
-      {tab === "ot" && <OTTab settings={settings} setSettings={setSettings} shifts={shifts} say={say} />}
+      {tab === "ot" && <OTTab settings={settings} editSettings={editSettings} shifts={shifts} say={say} />}
       {tab === "grid" && <AdminGrid bookings={bookings} settings={settings} {...actions} say={say} />}
       {tab === "shifts" && <ShiftsView settings={settings} bookings={bookings} shifts={shifts} setShifts={setShifts} editable say={say} />}
-      {tab === "settings" && <SettingsTab settings={settings} setSettings={setSettings} say={say} bookings={bookings} setBookings={setBookings} />}
+      {tab === "settings" && <SettingsTab settings={settings} editSettings={editSettings} saveState={saveState} saveErr={saveErr} say={say} bookings={bookings} setBookings={setBookings} />}
     </>
   );
 }
@@ -757,20 +782,23 @@ function ClassForm({ init, settings, bookings, onClose, onSave }) {
 }
 
 // ─── ตั้งค่า ──────────────────────────────────────────────────────
-function SettingsTab({ settings, setSettings, say, bookings, setBookings }) {
-  const [s, setS] = useState(settings);
-  const [busy, setBusy] = useState(false);
-  const dirty = JSON.stringify(s) !== JSON.stringify(settings);
-  const upd = (k, v) => setS((x) => ({ ...x, [k]: v }));
-  const listUpd = (k, id, patch) => upd(k, s[k].map((x) => (x.id === id ? { ...x, ...patch } : x)));
-  const listDel = (k, id) => upd(k, s[k].filter((x) => x.id !== id));
+function SettingsTab({ settings, editSettings, saveState, saveErr, say, bookings, setBookings }) {
+  const s = settings;
+  // แก้ทีละช่อง/ทีละรายการ แล้วระบบรวมกับของคนอื่นตอนบันทึก
+  const upd = (k, v) => editSettings((d) => ({ ...d, [k]: v }));
+  const listUpd = (k, id, patch) => editSettings((d) => ({ ...d, [k]: (d[k] || []).map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
+  const listDel = (k, id) => editSettings((d) => ({ ...d, [k]: (d[k] || []).filter((x) => x.id !== id) }));
+  const listAdd = (k, item) => editSettings((d) => ({ ...d, [k]: [...(d[k] || []), item] }));
   const base = HASH ? window.location.origin + window.location.pathname + "#" : window.location.origin;
   const links = [["ตารางห้อง (ทุกคนดูได้)", base + "/"], ["ลิงก์จองห้อง ส่งให้อาจารย์", base + "/book?as=teacher"], ["ลิงก์จองห้อง ส่งให้นักเรียน", base + "/book?as=student"], ["ลิงก์จองห้อง ผู้เช่าสถานที่", base + "/book?as=renter"], ["ลิงก์เปลี่ยนวัน/เวลา หรือยกเลิกคาบ", base + "/book?mode=move"], ["ลิงก์ขอใช้อุปกรณ์ (อาจารย์ประจำ)", base + "/equipment"], ["หน้ารับรองคาบ/งาน (แอดมิน + พนักงาน)", base + "/approve"], ["ตารางกะพนักงาน (ดูอย่างเดียว)", base + "/staff"], ["หน้าแอดมิน", base + "/admin"]];
   const copy = (t) => { navigator.clipboard?.writeText(t).then(() => say("คัดลอกลิงก์แล้ว"), () => window.prompt("คัดลอกลิงก์นี้", t)); };
-  const doSave = async () => { setBusy(true); try { await saveSettings(s); setSettings(s); say("บันทึกการตั้งค่าแล้ว"); } catch (e) { say("บันทึกไม่สำเร็จ: " + (e.message || e)); } setBusy(false); };
+
   const hours = Array.from({ length: 25 }, (_, i) => i);
   return (
     <div className="form" style={{ maxWidth: 760 }}>
+      <div className={"autosave " + saveState} role="status">
+        {saveState === "saving" ? "กำลังบันทึก…" : saveState === "error" ? `บันทึกไม่สำเร็จ: ${saveErr} (จะลองใหม่เมื่อแก้ครั้งถัดไป)` : saveState === "saved" ? "✓ บันทึกแล้ว · แก้ได้พร้อมกันหลายคน ทุกเครื่องเห็นทันที" : "แก้แล้วบันทึกอัตโนมัติ · แก้ได้พร้อมกันหลายคน ทุกเครื่องเห็นทันที"}
+      </div>
       <section className="sec">
         <h3>ผู้ติดต่อเมื่อตารางชน</h3>
         <span className="note-small">ชื่อและเบอร์นี้จะขึ้นให้คนจองเห็นตอนเลือกเวลาที่ชน และหลังส่งคำขอ</span>
@@ -784,7 +812,7 @@ function SettingsTab({ settings, setSettings, say, bookings, setBookings }) {
             </div>
           ))}
         </div>
-        <button className="btn" style={{ justifySelf: "start" }} onClick={() => upd("contacts", [...s.contacts, { id: uid(), name: "", phone: "", line: "" }])}><Plus size={16} /> เพิ่มผู้ติดต่อ</button>
+        <button className="btn" style={{ justifySelf: "start" }} onClick={() => listAdd("contacts", { id: uid(), name: "", phone: "", line: "" })}><Plus size={16} /> เพิ่มผู้ติดต่อ</button>
       </section>
 
       <section className="sec">
@@ -798,7 +826,7 @@ function SettingsTab({ settings, setSettings, say, bookings, setBookings }) {
             </div>
           ))}
         </div>
-        <button className="btn" style={{ justifySelf: "start" }} onClick={() => upd("rooms", [...s.rooms, { id: uid(), name: "ห้อง " + (s.rooms.length + 1) }])}><Plus size={16} /> เพิ่มห้อง</button>
+        <button className="btn" style={{ justifySelf: "start" }} onClick={() => listAdd("rooms", { id: uid(), name: "ห้อง " + (s.rooms.length + 1) })}><Plus size={16} /> เพิ่มห้อง</button>
       </section>
 
       <section className="sec">
@@ -811,7 +839,7 @@ function SettingsTab({ settings, setSettings, say, bookings, setBookings }) {
             </div>
           ))}
         </div>
-        <button className="btn" style={{ justifySelf: "start" }} onClick={() => upd("equipment", [...s.equipment, { id: uid(), name: "" }])}><Plus size={16} /> เพิ่มอุปกรณ์</button>
+        <button className="btn" style={{ justifySelf: "start" }} onClick={() => listAdd("equipment", { id: uid(), name: "" })}><Plus size={16} /> เพิ่มอุปกรณ์</button>
       </section>
 
       <section className="sec">
@@ -827,7 +855,7 @@ function SettingsTab({ settings, setSettings, say, bookings, setBookings }) {
             </div>
           ))}
         </div>
-        <button className="btn" style={{ justifySelf: "start" }} onClick={() => upd("staffMembers", [...s.staffMembers, { id: uid(), name: "", role: "" }])}><Plus size={16} /> เพิ่มพนักงาน</button>
+        <button className="btn" style={{ justifySelf: "start" }} onClick={() => listAdd("staffMembers", { id: uid(), name: "", role: "" })}><Plus size={16} /> เพิ่มพนักงาน</button>
       </section>
 
       <section className="sec">
@@ -843,7 +871,7 @@ function SettingsTab({ settings, setSettings, say, bookings, setBookings }) {
             </div>
           ))}
         </div>
-        <button className="btn" style={{ justifySelf: "start" }} onClick={() => upd("shiftPresets", [...s.shiftPresets, { id: uid(), name: "กะใหม่", start: "09:00", end: "18:00" }])}><Plus size={16} /> เพิ่มกะ</button>
+        <button className="btn" style={{ justifySelf: "start" }} onClick={() => listAdd("shiftPresets", { id: uid(), name: "กะใหม่", start: "09:00", end: "18:00" })}><Plus size={16} /> เพิ่มกะ</button>
       </section>
 
       <section className="sec">
@@ -856,12 +884,9 @@ function SettingsTab({ settings, setSettings, say, bookings, setBookings }) {
         <label style={{ display: "flex", gap: 8, alignItems: "center" }}><input type="checkbox" checked={s.showWeekend} onChange={(e) => upd("showWeekend", e.target.checked)} /> แสดงวันเสาร์–อาทิตย์ด้วย</label>
       </section>
 
-      <div className="actions" style={{ position: "sticky", bottom: 10 }}>
-        <button className="btn primary big" disabled={!dirty || busy} onClick={doSave}>{busy ? "กำลังบันทึก…" : "บันทึกการตั้งค่า"}</button>
-        {dirty && <button className="btn" onClick={() => setS(settings)}>ยกเลิกที่แก้</button>}
-      </div>
 
-      <ImportBox settings={settings} setSettings={(x) => { setSettings(x); setS(x); }} bookings={bookings} setBookings={setBookings} say={say} />
+
+      <ImportBox settings={settings} editSettings={editSettings} bookings={bookings} setBookings={setBookings} say={say} />
 
       <section className="sec">
         <h3>ลิงก์สำหรับส่งต่อ</h3>
@@ -878,7 +903,7 @@ function SettingsTab({ settings, setSettings, say, bookings, setBookings }) {
 }
 
 // ─── นำเข้าตารางจาก Excel (ปฏิทินรายเดือน 1 ชีต = 1 เดือน) ─────────────────
-function ImportBox({ settings, setSettings, bookings, setBookings, say }) {
+function ImportBox({ settings, editSettings, bookings, setBookings, say }) {
   const [parsed, setParsed] = useState(null);
   const [from, setFrom] = useState(() => { const d = new Date(); d.setDate(1); return ymd(d); });
   const [busy, setBusy] = useState(false);
@@ -898,8 +923,7 @@ function ImportBox({ settings, setSettings, bookings, setBookings, say }) {
       const need = [ROOM_BB, ROOM_WB].filter((r) => list.some((b) => b.room === r.id) && !settings.rooms.some((x) => x.id === r.id));
       if (need.length) {
         const onlyDefault = settings.rooms.length === 1 && settings.rooms[0].id === "r1" && !bookings.some((b) => b.room === "r1");
-        const next = { ...settings, rooms: [...(onlyDefault ? [] : settings.rooms), ...need] };
-        await saveSettings(next); setSettings(next);
+        editSettings((d) => ({ ...d, rooms: [...(onlyDefault ? d.rooms.filter((r) => r.id !== "r1") : d.rooms).filter((r) => !need.some((n) => n.id === r.id)), ...need] }));
       }
       await upsertBookings(fresh);
       setBookings([...bookings, ...fresh]);
@@ -1372,13 +1396,14 @@ function EquipPage({ bookings, settings, setBookings, params }) {
 }
 
 // ─── คำนวณค่าโอที ────────────────────────────────────────────────
-function OTTab({ settings, setSettings, shifts, say }) {
+function OTTab({ settings, editSettings, shifts, say }) {
   const ot = { ...DEFAULT_SETTINGS.ot, ...(settings.ot || {}) };
-  const [rate, setRate] = useState(ot);
+  const rate = ot;
+  const setRate = (r) => editSettings((d) => ({ ...d, ot: { ...DEFAULT_SETTINGS.ot, ...(d.ot || {}), ...Object.fromEntries(Object.entries(r).filter(([k, v]) => v !== ot[k])) } }));
   const monthRange = (offset) => { const d = new Date(); const a = new Date(d.getFullYear(), d.getMonth() + offset, 1); const b = new Date(d.getFullYear(), d.getMonth() + offset + 1, 0); return [ymd(a), ymd(b)]; };
   const [[from, to], setRange] = useState(() => monthRange(0));
   const [open, setOpen] = useState(null);
-  const dirty = JSON.stringify(rate) !== JSON.stringify(ot);
+
   const staff = settings.staffMembers || [];
   const rows = staff.map((m) => {
     const list = shifts.filter((x) => x.staffId === m.id && x.date >= from && x.date <= to && x.status !== "leave")
@@ -1389,7 +1414,7 @@ function OTTab({ settings, setSettings, shifts, say }) {
     return { m, list, uni, ext, pay: (uni / 60) * (Number(rate.uni) || 0) + (ext / 60) * (Number(rate.ext) || 0) };
   });
   const total = rows.reduce((a, r) => a + r.pay, 0);
-  const saveRate = async () => { const next = { ...settings, ot: { ...rate, uni: Number(rate.uni) || 0, ext: Number(rate.ext) || 0 } }; try { await saveSettings(next); setSettings(next); say("บันทึกอัตราโอทีแล้ว"); } catch (e) { say("บันทึกไม่สำเร็จ: " + (e.message || e)); } };
+
   const summary = () => {
     const t = [`สรุปค่าโอที ${fmtDate(from).replace(/^วัน\S+ที่ /, "")} – ${fmtDate(to).replace(/^วัน\S+ที่ /, "")}`];
     rows.filter((r) => r.pay > 0).forEach((r) => t.push(`${r.m.name}: มหาลัย ${fmtHrs(r.uni)} ชม. · งานนอก ${fmtHrs(r.ext)} ชม. = ${fmtBaht(r.pay)} บาท`));
@@ -1407,7 +1432,7 @@ function OTTab({ settings, setSettings, shifts, say }) {
           <label className="f"><span>จ–ศ นับโอทีหลัง</span><select className="in" value={rate.after} onChange={(e) => setRate({ ...rate, after: e.target.value })}>{DAY_TIMES.map((t) => <option key={t}>{t}</option>)}</select></label>
         </div>
         <span className="note-small">วันจันทร์–ศุกร์ นับเฉพาะช่วงก่อน {rate.before} และหลัง {rate.after} · เสาร์–อาทิตย์ นับเป็นโอทีทั้งกะ · ประเภทงานเลือกตอนลงกะ (แท็บกะพนักงาน)</span>
-        {dirty && <div className="actions"><button className="btn primary" onClick={saveRate}>บันทึกอัตรา</button><button className="btn ghost" onClick={() => setRate(ot)}>ยกเลิก</button></div>}
+        <span className="note-small">แก้แล้วบันทึกอัตโนมัติ</span>
       </section>
 
       <section className="sec">

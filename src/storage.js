@@ -13,8 +13,8 @@ const writeLS = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } 
 
 const DEMO = import.meta.glob("./demo-seed.json", { eager: true });
 function demoSeed() {
-  if (import.meta.env.VITE_DEMO !== "1" || localStorage.getItem("twt-rooms-seed") === "mahidol-v7") return;
-  localStorage.setItem("twt-rooms-seed", "mahidol-v7");
+  if (import.meta.env.VITE_DEMO !== "1" || localStorage.getItem("twt-rooms-seed") === "mahidol-v8") return;
+  localStorage.setItem("twt-rooms-seed", "mahidol-v8");
   const seed = Object.values(DEMO)[0]?.default; if (!seed) return;
   writeLS(LS_B, seed.bookings); writeLS(LS_S, seed.settings); writeLS(LS_SH, seed.shifts || []);
 }
@@ -76,6 +76,7 @@ export function subscribe(onChange) {
   const ch = supabase.channel("room-bookings")
     .on("postgres_changes", { event: "*", schema: "public", table: "room_bookings" }, () => onChange())
     .on("postgres_changes", { event: "*", schema: "public", table: "room_shifts" }, () => onChange())
+    .on("postgres_changes", { event: "*", schema: "public", table: "room_settings" }, () => onChange())
     .subscribe();
   return () => { supabase.removeChannel(ch); };
 }

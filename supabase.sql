@@ -25,8 +25,9 @@ create policy "settings read"   on room_settings for select using (true);
 create policy "settings insert" on room_settings for insert with check (true);
 create policy "settings update" on room_settings for update using (true);
 
--- ให้หน้าเว็บอัปเดตเองทันทีเมื่อมีคนจอง
+-- ให้หน้าเว็บอัปเดตเองทันทีเมื่อมีคนจอง / แก้การตั้งค่า
 alter publication supabase_realtime add table room_bookings;
+alter publication supabase_realtime add table room_settings;
 
 -- กะพนักงาน (ใครเข้างานเวลาไหน)
 create table if not exists room_shifts (
@@ -41,3 +42,8 @@ create policy "shifts insert" on room_shifts for insert with check (true);
 create policy "shifts update" on room_shifts for update using (true);
 create policy "shifts delete" on room_shifts for delete using (true);
 alter publication supabase_realtime add table room_shifts;
+
+-- สิทธิ์ให้เว็บ (anon / publishable key) อ่าน-เขียนตารางได้
+-- โปรเจกต์ Supabase ใหม่บางโปรเจกต์ไม่ให้สิทธิ์อัตโนมัติ ถ้าไม่มีส่วนนี้จะขึ้น "permission denied for table ..."
+grant usage on schema public to anon, authenticated;
+grant select, insert, update, delete on table room_bookings, room_settings, room_shifts to anon, authenticated;
